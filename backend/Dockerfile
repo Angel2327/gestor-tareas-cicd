@@ -12,8 +12,9 @@ RUN apt-get update \
     && apt-get upgrade -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
-RUN pip install -r requirements.txt
+COPY requirements.lock .
+# Solo wheels (sin ejecutar setup.py) y verificando el hash de cada paquete
+RUN pip install --only-binary :all: --require-hashes -r requirements.lock
 
 COPY alembic.ini .
 COPY migrations ./migrations
