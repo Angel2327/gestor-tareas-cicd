@@ -29,11 +29,6 @@ data "aws_iam_role" "lab_role" {
   name = var.lab_role_name
 }
 
-data "aws_caller_identity" "current" {}
-
-# Cuenta de AWS que escribe los access logs del ALB en esta región
-data "aws_elb_service_account" "main" {}
-
 # ---------------------------------------------------------------------------
 # Security Groups: ALB (público) -> ECS (solo desde ALB) -> RDS (solo desde ECS)
 # ---------------------------------------------------------------------------
@@ -144,90 +139,15 @@ resource "aws_db_instance" "this" {
 # ---------------------------------------------------------------------------
 # Balanceador: un ALB por ambiente con enrutamiento por ruta
 # ---------------------------------------------------------------------------
-# Bucket privado y cifrado para los access logs del ALB (auditoría de peticiones)
-resource "aws_s3_bucket" "alb_logs" {
-  bucket        = "${local.name}-alb-logs-${data.aws_caller_identity.current.account_id}"
-  force_destroy = true
-}
-
-resource "aws_s3_bucket_public_access_block" "alb_logs" {
-  bucket                  = aws_s3_bucket.alb_logs.id
-  block_public_acls       = true
-  block_public_policy     = true
-  ignore_public_acls      = true
-  restrict_public_buckets = true
-}
-
-resource "aws_s3_bucket_server_side_encryption_configuration" "alb_logs" {
-  bucket = aws_s3_bucket.alb_logs.id
-  rule {
-    apply_server_side_encryption_by_default {
-      sse_algorithm = "AES256" # Los access logs del ALB solo admiten SSE-S3
-    }
-  }
-}
-
-resource "aws_s3_bucket_versioning" "alb_logs" {
-  bucket = aws_s3_bucket.alb_logs.id
-  versioning_configuration {
-    status = "Enabled"
-  }
-}
-
-resource "aws_s3_bucket_lifecycle_configuration" "alb_logs" {
-  bucket = aws_s3_bucket.alb_logs.id
-  rule {
-    id     = "expirar-logs"
-    status = "Enabled"
-    filter {}
-    expiration {
-      days = 30
-    }
-    noncurrent_version_expiration {
-      noncurrent_days = 1
-    }
-  }
-}
-
-resource "aws_s3_bucket_policy" "alb_logs" {
-  bucket = aws_s3_bucket.alb_logs.id
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Sid       = "PermitirLogsDelALB"
-        Effect    = "Allow"
-        Principal = { AWS = data.aws_elb_service_account.main.arn }
-        Action    = "s3:PutObject"
-        Resource  = "${aws_s3_bucket.alb_logs.arn}/alb/AWSLogs/${data.aws_caller_identity.current.account_id}/*"
-      },
-      {
-        Sid       = "SoloHTTPS"
-        Effect    = "Deny"
-        Principal = "*"
-        Action    = "s3:*"
-        Resource  = [aws_s3_bucket.alb_logs.arn, "${aws_s3_bucket.alb_logs.arn}/*"]
-        Condition = { Bool = { "aws:SecureTransport" = "false" } }
-      },
-    ]
-  })
-  depends_on = [aws_s3_bucket_public_access_block.alb_logs]
-}
-
+# Sin access logs en S3: la política (SCP) del AWS Learner Lab niega
+# s3:GetBucketObjectLockConfiguration, que Terraform necesita para gestionar
+# buckets. Las peticiones quedan registradas en los logs de ECS (CloudWatch).
 resource "aws_lb" "this" {
   name                       = "${local.name}-alb"
   load_balancer_type         = "application"
   security_groups            = [aws_security_group.alb.id]
   subnets                    = data.aws_subnets.default.ids
   drop_invalid_header_fields = true
-
-  access_logs {
-    bucket  = aws_s3_bucket.alb_logs.id
-    prefix  = "alb"
-    enabled = true
-  }
-
-  depends_on = [aws_s3_bucket_policy.alb_logs]
 }
 
 resource "aws_lb_target_group" "backend" {
