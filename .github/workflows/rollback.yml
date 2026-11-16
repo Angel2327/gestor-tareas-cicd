@@ -1,0 +1,81 @@
+# Botón de pánico: rollback manual de un ambiente.
+# GitHub -> Actions -> "Rollback manual (botón de pánico)" -> Run workflow
+
+name: Rollback manual (botón de pánico)
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Ambiente a revertir
+        type: choice
+        options: [production, staging]
+        required: true
+      backend_revision:
+        description: "Revisión destino del backend (ej. 7). Vacío = la anterior"
+        required: false
+        default: ""
+      frontend_revision:
+        description: "Revisión destino del frontend (ej. 7). Vacío = la anterior"
+        required: false
+        default: ""
+      reason:
+        description: Motivo del rollback
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rollback-${{ inputs.environment }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  AWS_REGION: us-east-1
+  PREFIX: gestor-tareas-${{ inputs.environment }}
+
+jobs:
+  rollback:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Rollback de backend y frontend
+        env:
+          BACKEND_REV: ${{ inputs.backend_revision }}
+          FRONTEND_REV: ${{ inputs.frontend_revision }}
+          REASON: ${{ inputs.reason }}
+        run: |
+          {
+            echo "## Rollback manual - ${{ inputs.environment }}"
+            echo "**Motivo:** $REASON  "
+            echo "**Ejecutado por:** ${{ github.actor }}"
+            echo
+            echo "| Servicio | Desde | Hacia | Imagen |"
+            echo "|---|---|---|---|"
+          } >> "$GITHUB_STEP_SUMMARY"
+          target() { [[ -n "$2" ]] && echo "$PREFIX-$1:$2" || echo ""; }
+          bash scripts/rollback.sh "$PREFIX-cluster" "$PREFIX-backend" \
+            "$(target backend "$BACKEND_REV")"
+          bash scripts/rollback.sh "$PREFIX-cluster" "$PREFIX-frontend" \
+            "$(target frontend "$FRONTEND_REV")"
+
+      - name: Verificar el ambiente después del rollback
+        run: |
+          DNS=$(aws elbv2 describe-load-balancers --names "$PREFIX-alb" \
+            --query 'LoadBalancers[0].DNSName' --output text)
+          BODY=$(curl -sf "http://$DNS/api/health")
+          echo "$BODY"
+          echo "**/api/health:** \`$BODY\`" >> "$GITHUB_STEP_SUMMARY"

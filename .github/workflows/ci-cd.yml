@@ -7,6 +7,7 @@
 # CI: Checkout -> Build -> Test (estáticas, seguridad, unitarias+cobertura, e2e) -> Release (ECR)
 # CD: IaC -> Deploy Infra -> Deploy App -> Tests Pre-Prod (Staging)
 #     -> Aprobación manual -> Deploy Infra -> Deploy App -> Smoke Post-Prod (Producción)
+#     -> Rollback automático si fallan las pruebas (y manual en rollback.yml)
 
 name: CI/CD Pipeline
 
@@ -415,6 +416,35 @@ jobs:
           name: staging-report
           path: staging-report.html
 
+  rollback-staging:
+    needs: [deploy-infra-staging, deploy-app-staging, test-staging]
+    if: failure() && needs.deploy-app-staging.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Rollback automático de Staging
+        env:
+          CLUSTER: ${{ needs.deploy-infra-staging.outputs.cluster }}
+        run: |
+          echo "## Rollback automático - Staging" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Servicio | Desde | Hacia | Imagen |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          bash scripts/rollback.sh "$CLUSTER" \
+            "${{ needs.deploy-infra-staging.outputs.backend_service }}" \
+            "${{ needs.deploy-app-staging.outputs.previous_backend_task_def }}"
+          bash scripts/rollback.sh "$CLUSTER" \
+            "${{ needs.deploy-infra-staging.outputs.frontend_service }}" \
+            "${{ needs.deploy-app-staging.outputs.previous_frontend_task_def }}"
+
   # ===========================================================================
   # CD 4. PRODUCCIÓN: Deploy Infra (requiere aprobación manual en el ambiente)
   # ===========================================================================
@@ -520,7 +550,9 @@ jobs:
     runs-on: ubuntu-latest
     env:
       APP_BASE_URL: ${{ needs.deploy-infra-production.outputs.alb_url }}
-      EXPECTED_VERSION: ${{ github.sha }}
+      # Para demostrar el rollback automático: crear la variable de repositorio
+      # SIMULATE_SMOKE_FAILURE=true. La prueba exige una versión que no existe.
+      EXPECTED_VERSION: ${{ vars.SIMULATE_SMOKE_FAILURE == 'true' && 'version-inexistente' || github.sha }}
     steps:
       - uses: actions/checkout@v7
 
@@ -536,7 +568,7 @@ jobs:
           pip install --only-binary :all: --require-hashes -r requirements-dev.lock
 
       - name: Esperar la versión nueva en Producción
-        run: bash scripts/wait_for_version.sh "$APP_BASE_URL" "$EXPECTED_VERSION"
+        run: bash scripts/wait_for_version.sh "$APP_BASE_URL" "${{ github.sha }}"
 
       - name: Pruebas de humo contra Producción
         run: pytest tests/smoke --html=production-smoke-report.html --self-contained-html
@@ -547,3 +579,41 @@ jobs:
         with:
           name: production-smoke-report
           path: production-smoke-report.html
+
+  # ===========================================================================
+  # CD 7. Rollback automático de Producción (si fallan las pruebas de humo)
+  # ===========================================================================
+  rollback-production:
+    needs: [deploy-infra-production, deploy-app-production, smoke-test-production]
+    if: failure() && needs.deploy-app-production.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Rollback a la versión anterior
+        env:
+          CLUSTER: ${{ needs.deploy-infra-production.outputs.cluster }}
+        run: |
+          echo "## Rollback automático - Producción" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Servicio | Desde | Hacia | Imagen |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          bash scripts/rollback.sh "$CLUSTER" \
+            "${{ needs.deploy-infra-production.outputs.backend_service }}" \
+            "${{ needs.deploy-app-production.outputs.previous_backend_task_def }}"
+          bash scripts/rollback.sh "$CLUSTER" \
+            "${{ needs.deploy-infra-production.outputs.frontend_service }}" \
+            "${{ needs.deploy-app-production.outputs.previous_frontend_task_def }}"
+
+      - name: Verificar Producción después del rollback
+        run: |
+          curl -sf "${{ needs.deploy-infra-production.outputs.alb_url }}/api/health"
+          echo
+          echo "Producción quedó en la versión anterior" >> "$GITHUB_STEP_SUMMARY"
