@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+*report.html
+*-report.txt
+*-report.json
+*.db
+assets/
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+
+# Docker
+images.tar
+
+# Varios
+.idea/
+.vscode/
+.DS_Store
+_to_delete/
