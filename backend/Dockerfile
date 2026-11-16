@@ -13,8 +13,11 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.lock .
-# Solo wheels (sin ejecutar setup.py) y verificando el hash de cada paquete
-RUN pip install --only-binary :all: --require-hashes -r requirements.lock
+# Solo wheels (sin ejecutar setup.py) y verificando el hash de cada paquete.
+# Luego quita pip/setuptools: en ejecución no se necesitan y Trivy
+# reporta vulnerabilidades en ellos.
+RUN pip install --only-binary :all: --require-hashes -r requirements.lock \
+    && python -m pip uninstall -y pip setuptools
 
 COPY alembic.ini .
 COPY migrations ./migrations
