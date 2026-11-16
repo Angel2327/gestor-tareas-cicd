@@ -17,15 +17,41 @@ WAIT = 15
 
 
 @pytest.fixture(name="browser")
-def fixture_browser():
+def fixture_browser(base_url):
     options = webdriver.ChromeOptions()
     options.add_argument("--headless=new")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--window-size=1280,900")
+    # Desde Chrome 154 "Always Use Secure Connections" viene activo y muestra
+    # una advertencia antes de abrir sitios públicos por HTTP (como el ALB del
+    # Learner Lab, que no tiene HTTPS). Se desactiva solo en el Chrome de pruebas.
+    options.add_argument(f"--unsafely-treat-insecure-origin-as-secure={base_url}")
+    options.add_argument(
+        "--disable-features=HttpsUpgrades,HttpsFirstBalancedModeAutoEnable,"
+        "HttpsFirstModeV2ForTypicallySecureUsers,HttpsFirstModeIncognito"
+    )
+    options.add_experimental_option(
+        "prefs",
+        {
+            "https_only_mode_enabled": False,
+            "https_first_balanced_mode_enabled": False,
+        },
+    )
     driver = webdriver.Chrome(options=options)
     yield driver
     driver.quit()
+
+
+def _open(browser, url):
+    """Abre la app. Si Chrome aún muestra la advertencia de HTTP, la acepta."""
+    browser.get(url)
+    proceed = browser.find_elements(By.ID, "proceed-button")
+    if proceed:
+        proceed[0].click()
+    WebDriverWait(browser, WAIT).until(
+        EC.presence_of_element_located((By.ID, "task-form"))
+    )
 
 
 def _wait(browser):
@@ -63,7 +89,7 @@ def _create_task(browser, title, priority="Alta"):
 
 
 def test_pagina_carga_con_version(browser, base_url):
-    browser.get(base_url)
+    _open(browser, base_url)
     assert "Gestor de Tareas" in browser.title
     version = browser.find_element(By.ID, "app-version")
     _wait(browser).until(lambda _: version.text not in ("...", "sin conexión", ""))
@@ -71,7 +97,7 @@ def test_pagina_carga_con_version(browser, base_url):
 
 def test_crear_completar_y_eliminar_tarea(browser, base_url):
     title = f"Selenium {uuid.uuid4().hex[:6]}"
-    browser.get(base_url)
+    _open(browser, base_url)
 
     item = _create_task(browser, title)
     assert "Prioridad Alta" in item.text
@@ -88,7 +114,7 @@ def test_crear_completar_y_eliminar_tarea(browser, base_url):
 
 def test_filtro_por_estado(browser, base_url):
     title = f"Filtro {uuid.uuid4().hex[:6]}"
-    browser.get(base_url)
+    _open(browser, base_url)
     _create_task(browser, title, priority="Baja")
 
     Select(browser.find_element(By.ID, "filter-status")).select_by_value("done")
@@ -104,7 +130,7 @@ def test_filtro_por_estado(browser, base_url):
 
 
 def test_titulo_vacio_muestra_error(browser, base_url):
-    browser.get(base_url)
+    _open(browser, base_url)
     browser.find_element(By.ID, "title").send_keys("   ")
     browser.find_element(By.ID, "submit-btn").click()
     message = browser.find_element(By.ID, "message")
