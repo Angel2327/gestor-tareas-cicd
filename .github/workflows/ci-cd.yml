@@ -1,8 +1,12 @@
 # Pipeline CI/CD - Gestor de Tareas
 #
 # Estrategia de ramas: Trunk-Based Development
-#   - feature/* (ramas cortas) -> Pull Request a main  => CI (build-and-test)
-#   - push/merge a main                                 => CI
+#   - feature/* (ramas cortas) -> Pull Request a main  => solo CI (build-and-test)
+#   - push/merge a main                                 => CI + Release + CD completo
+#
+# CI: Checkout -> Build -> Test (estáticas, seguridad, unitarias+cobertura, e2e) -> Release (ECR)
+# CD: IaC -> Deploy Infra -> Deploy App -> Tests Pre-Prod (Staging)
+#     -> Aprobación manual -> Deploy Infra -> Deploy App -> Smoke Post-Prod (Producción)
 
 name: CI/CD Pipeline
 
@@ -16,6 +20,7 @@ on:
 permissions:
   contents: read
 
+# Nunca dos despliegues a la vez; en PRs se cancela la ejecución anterior
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -25,15 +30,16 @@ defaults:
     shell: bash
 
 env:
+  AWS_REGION: us-east-1
   PYTHON_VERSION: "3.13"
-  TRIVY_VERSION: v0.69.3
   TF_VERSION: "1.17.2"
+  TRIVY_VERSION: v0.69.3
   BACKEND_LOCAL_IMAGE: gestor-tareas-backend:${{ github.sha }}
   FRONTEND_LOCAL_IMAGE: gestor-tareas-frontend:${{ github.sha }}
 
 jobs:
   # ===========================================================================
-  # CI. Build + Test
+  # CI 1. Build + Test (corre en PRs y en main)
   # ===========================================================================
   build-and-test: # No cambiar el nombre: lo exige la regla de protección de main
     runs-on: ubuntu-latest
@@ -103,7 +109,6 @@ jobs:
           exit-code: "0"
           output: trivy-iac-report.txt
 
-      # ---------------- Infraestructura como código ----------------
       - name: Set up Terraform
         uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
         with:
@@ -155,9 +160,7 @@ jobs:
           APP_VERSION: ${{ github.sha }}
         run: |
           docker compose up -d --no-build
-          # Espera hasta 2 minutos a que la API responda con esta versión
-          timeout 120 bash -c \
-            'until curl -sf http://localhost:8080/api/health | grep -q "${{ github.sha }}"; do sleep 3; done'
+          bash scripts/wait_for_version.sh http://localhost:8080 "${{ github.sha }}" 120
 
       - name: Pruebas de humo, API e2e y aceptación (Selenium) contra el stack local
         env:
@@ -195,3 +198,352 @@ jobs:
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL }}
+
+      # Build once: las mismas imágenes probadas viajan al job de Release
+      - name: Guardar imágenes probadas
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        run: docker save "$BACKEND_LOCAL_IMAGE" "$FRONTEND_LOCAL_IMAGE" -o images.tar
+
+      - name: Upload images
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v7
+        with:
+          name: docker-images
+          path: images.tar
+          retention-days: 1
+
+  # ===========================================================================
+  # CI 2. Release: IaC del registro (ECR) + publicación de las imágenes
+  # ===========================================================================
+  release:
+    needs: build-and-test
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    outputs:
+      backend_image: ${{ steps.push.outputs.backend_image }}
+      frontend_image: ${{ steps.push.outputs.frontend_image }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Download images
+        uses: actions/download-artifact@v8
+        with:
+          name: docker-images
+
+      - name: Load images
+        run: docker load -i images.tar
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: IaC - Terraform Apply del registro (ECR)
+        working-directory: infra/registry
+        run: |
+          terraform init -input=false -backend-config=../backend.hcl
+          terraform apply -auto-approve -input=false
+          {
+            echo "BACKEND_REPO=$(terraform output -raw backend_repository_url)"
+            echo "FRONTEND_REPO=$(terraform output -raw frontend_repository_url)"
+          } >> "$GITHUB_ENV"
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2.1.7
+
+      - name: Push images (etiqueta = SHA, inmutable)
+        id: push
+        run: |
+          push() {
+            local local_image="$1" repo="$2"
+            local name="${repo##*/}"
+            if aws ecr describe-images --repository-name "$name" \
+                 --image-ids imageTag="$GITHUB_SHA" > /dev/null 2>&1; then
+              echo "$repo:$GITHUB_SHA ya existe (re-ejecución); no se vuelve a subir"
+            else
+              docker tag "$local_image" "$repo:$GITHUB_SHA"
+              docker push "$repo:$GITHUB_SHA"
+            fi
+          }
+          push "$BACKEND_LOCAL_IMAGE" "$BACKEND_REPO"
+          push "$FRONTEND_LOCAL_IMAGE" "$FRONTEND_REPO"
+          echo "backend_image=$BACKEND_REPO:$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+          echo "frontend_image=$FRONTEND_REPO:$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+
+  # ===========================================================================
+  # CD 1. STAGING: Deploy Infra (Terraform)
+  # ===========================================================================
+  deploy-infra-staging:
+    needs: release
+    runs-on: ubuntu-latest
+    environment:
+      name: staging
+      url: ${{ steps.tf.outputs.alb_url }}
+    outputs:
+      alb_url: ${{ steps.tf.outputs.alb_url }}
+      cluster: ${{ steps.tf.outputs.cluster }}
+      backend_service: ${{ steps.tf.outputs.backend_service }}
+      frontend_service: ${{ steps.tf.outputs.frontend_service }}
+      backend_task_def: ${{ steps.tf.outputs.backend_task_def }}
+      frontend_task_def: ${{ steps.tf.outputs.frontend_task_def }}
+      subnets: ${{ steps.tf.outputs.subnets }}
+      security_group: ${{ steps.tf.outputs.security_group }}
+    defaults:
+      run:
+        working-directory: infra/app
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Terraform Init (workspace staging)
+        run: |
+          terraform init -input=false -backend-config=../backend.hcl
+          terraform workspace select -or-create staging
+
+      - name: Terraform Apply
+        env:
+          TF_VAR_environment_name: staging
+          TF_VAR_backend_image_uri: ${{ needs.release.outputs.backend_image }}
+          TF_VAR_frontend_image_uri: ${{ needs.release.outputs.frontend_image }}
+          TF_VAR_app_version: ${{ github.sha }}
+        run: terraform apply -auto-approve -input=false
+
+      - name: Terraform Outputs
+        id: tf
+        run: |
+          {
+            echo "alb_url=$(terraform output -raw alb_url)"
+            echo "cluster=$(terraform output -raw cluster_name)"
+            echo "backend_service=$(terraform output -raw backend_service_name)"
+            echo "frontend_service=$(terraform output -raw frontend_service_name)"
+            echo "backend_task_def=$(terraform output -raw backend_task_definition_arn)"
+            echo "frontend_task_def=$(terraform output -raw frontend_task_definition_arn)"
+            echo "subnets=$(terraform output -raw subnet_ids)"
+            echo "security_group=$(terraform output -raw ecs_security_group_id)"
+          } >> "$GITHUB_OUTPUT"
+
+  # ===========================================================================
+  # CD 2. STAGING: Deploy App (migraciones + rolling update en ECS)
+  # ===========================================================================
+  deploy-app-staging:
+    needs: deploy-infra-staging
+    runs-on: ubuntu-latest
+    outputs:
+      previous_backend_task_def: ${{ steps.deploy.outputs.previous_backend_task_def }}
+      previous_frontend_task_def: ${{ steps.deploy.outputs.previous_frontend_task_def }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Migraciones + despliegue en ECS
+        id: deploy
+        env:
+          CLUSTER: ${{ needs.deploy-infra-staging.outputs.cluster }}
+          BACKEND_SERVICE: ${{ needs.deploy-infra-staging.outputs.backend_service }}
+          FRONTEND_SERVICE: ${{ needs.deploy-infra-staging.outputs.frontend_service }}
+          BACKEND_TASK_DEF: ${{ needs.deploy-infra-staging.outputs.backend_task_def }}
+          FRONTEND_TASK_DEF: ${{ needs.deploy-infra-staging.outputs.frontend_task_def }}
+          SUBNETS: ${{ needs.deploy-infra-staging.outputs.subnets }}
+          SECURITY_GROUP: ${{ needs.deploy-infra-staging.outputs.security_group }}
+        run: bash scripts/deploy_app.sh
+
+  # ===========================================================================
+  # CD 3. Tests Pre-Prod (Staging): humo + API e2e + aceptación Selenium
+  # ===========================================================================
+  test-staging:
+    needs: [deploy-infra-staging, deploy-app-staging]
+    runs-on: ubuntu-latest
+    env:
+      APP_BASE_URL: ${{ needs.deploy-infra-staging.outputs.alb_url }}
+      EXPECTED_VERSION: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements-dev.lock
+
+      - name: Install dependencies
+        run: |
+          pip install --only-binary :all: --require-hashes -r requirements-dev.lock
+
+      - name: Esperar la versión nueva en Staging
+        run: bash scripts/wait_for_version.sh "$APP_BASE_URL" "$EXPECTED_VERSION"
+
+      - name: Pruebas de humo, API e2e y aceptación contra Staging
+        run: |
+          pytest tests/smoke tests/api tests/acceptance \
+            --html=staging-report.html --self-contained-html
+
+      - name: Upload Staging report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: staging-report
+          path: staging-report.html
+
+  # ===========================================================================
+  # CD 4. PRODUCCIÓN: Deploy Infra (requiere aprobación manual en el ambiente)
+  # ===========================================================================
+  deploy-infra-production:
+    needs: [release, test-staging]
+    runs-on: ubuntu-latest
+    environment:
+      name: production # Tiene revisores requeridos: el pipeline espera la aprobación
+      url: ${{ steps.tf.outputs.alb_url }}
+    outputs:
+      alb_url: ${{ steps.tf.outputs.alb_url }}
+      cluster: ${{ steps.tf.outputs.cluster }}
+      backend_service: ${{ steps.tf.outputs.backend_service }}
+      frontend_service: ${{ steps.tf.outputs.frontend_service }}
+      backend_task_def: ${{ steps.tf.outputs.backend_task_def }}
+      frontend_task_def: ${{ steps.tf.outputs.frontend_task_def }}
+      subnets: ${{ steps.tf.outputs.subnets }}
+      security_group: ${{ steps.tf.outputs.security_group }}
+    defaults:
+      run:
+        working-directory: infra/app
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Terraform Init (workspace production)
+        run: |
+          terraform init -input=false -backend-config=../backend.hcl
+          terraform workspace select -or-create production
+
+      - name: Terraform Apply (misma imagen probada en Staging)
+        env:
+          TF_VAR_environment_name: production
+          TF_VAR_backend_image_uri: ${{ needs.release.outputs.backend_image }}
+          TF_VAR_frontend_image_uri: ${{ needs.release.outputs.frontend_image }}
+          TF_VAR_app_version: ${{ github.sha }}
+        run: terraform apply -auto-approve -input=false
+
+      - name: Terraform Outputs
+        id: tf
+        run: |
+          {
+            echo "alb_url=$(terraform output -raw alb_url)"
+            echo "cluster=$(terraform output -raw cluster_name)"
+            echo "backend_service=$(terraform output -raw backend_service_name)"
+            echo "frontend_service=$(terraform output -raw frontend_service_name)"
+            echo "backend_task_def=$(terraform output -raw backend_task_definition_arn)"
+            echo "frontend_task_def=$(terraform output -raw frontend_task_definition_arn)"
+            echo "subnets=$(terraform output -raw subnet_ids)"
+            echo "security_group=$(terraform output -raw ecs_security_group_id)"
+          } >> "$GITHUB_OUTPUT"
+
+  # ===========================================================================
+  # CD 5. PRODUCCIÓN: Deploy App
+  # ===========================================================================
+  deploy-app-production:
+    needs: deploy-infra-production
+    runs-on: ubuntu-latest
+    outputs:
+      previous_backend_task_def: ${{ steps.deploy.outputs.previous_backend_task_def }}
+      previous_frontend_task_def: ${{ steps.deploy.outputs.previous_frontend_task_def }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Migraciones + despliegue en ECS
+        id: deploy
+        env:
+          CLUSTER: ${{ needs.deploy-infra-production.outputs.cluster }}
+          BACKEND_SERVICE: ${{ needs.deploy-infra-production.outputs.backend_service }}
+          FRONTEND_SERVICE: ${{ needs.deploy-infra-production.outputs.frontend_service }}
+          BACKEND_TASK_DEF: ${{ needs.deploy-infra-production.outputs.backend_task_def }}
+          FRONTEND_TASK_DEF: ${{ needs.deploy-infra-production.outputs.frontend_task_def }}
+          SUBNETS: ${{ needs.deploy-infra-production.outputs.subnets }}
+          SECURITY_GROUP: ${{ needs.deploy-infra-production.outputs.security_group }}
+        run: bash scripts/deploy_app.sh
+
+  # ===========================================================================
+  # CD 6. Tests Post-Prod: pruebas de humo (no modifican datos)
+  # ===========================================================================
+  smoke-test-production:
+    needs: [deploy-infra-production, deploy-app-production]
+    runs-on: ubuntu-latest
+    env:
+      APP_BASE_URL: ${{ needs.deploy-infra-production.outputs.alb_url }}
+      EXPECTED_VERSION: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements-dev.lock
+
+      - name: Install dependencies
+        run: |
+          pip install --only-binary :all: --require-hashes -r requirements-dev.lock
+
+      - name: Esperar la versión nueva en Producción
+        run: bash scripts/wait_for_version.sh "$APP_BASE_URL" "$EXPECTED_VERSION"
+
+      - name: Pruebas de humo contra Producción
+        run: pytest tests/smoke --html=production-smoke-report.html --self-contained-html
+
+      - name: Upload Production report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: production-smoke-report
+          path: production-smoke-report.html
