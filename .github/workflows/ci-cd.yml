@@ -1,0 +1,127 @@
+# Pipeline CI/CD - Gestor de Tareas
+#
+# Estrategia de ramas: Trunk-Based Development
+#   - feature/* (ramas cortas) -> Pull Request a main  => CI (build-and-test)
+#   - push/merge a main                                 => CI
+
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  PYTHON_VERSION: "3.13"
+  BACKEND_LOCAL_IMAGE: gestor-tareas-backend:${{ github.sha }}
+  FRONTEND_LOCAL_IMAGE: gestor-tareas-frontend:${{ github.sha }}
+
+jobs:
+  # ===========================================================================
+  # CI. Build + Test
+  # ===========================================================================
+  build-and-test: # No cambiar el nombre: lo exige la regla de protección de main
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # SonarCloud usa el historial para detectar código nuevo
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      # ---------------- Pruebas estáticas (calidad) ----------------
+      - name: Black (formato)
+        run: black --check --config backend/pyproject.toml backend tests
+
+      - name: Pylint (linter, nota mínima 9)
+        env:
+          PYTHONPATH: backend
+        run: |
+          pylint backend/app --rcfile=backend/pyproject.toml --fail-under=9 \
+            --output-format=parseable | tee pylint-report.txt
+
+      - name: Flake8 (linter)
+        run: |
+          flake8 backend/app backend/tests tests --config backend/.flake8 \
+            --tee --output-file=flake8-report.txt
+
+      # ---------------- Pruebas unitarias y de componente ----------------
+      - name: Pruebas unitarias y de componente (cobertura >= 80 %)
+        working-directory: backend
+        run: pytest
+
+      # ---------------- Build de las imágenes ----------------
+      - name: Build Docker images
+        run: |
+          docker build -t "$BACKEND_LOCAL_IMAGE" backend
+          docker build -t "$FRONTEND_LOCAL_IMAGE" frontend
+
+      # ---------------- Pruebas de integración / aceptación ----------------
+      - name: Levantar el stack completo (Nginx + API + PostgreSQL)
+        env:
+          BACKEND_IMAGE: ${{ env.BACKEND_LOCAL_IMAGE }}
+          FRONTEND_IMAGE: ${{ env.FRONTEND_LOCAL_IMAGE }}
+          APP_VERSION: ${{ github.sha }}
+        run: |
+          docker compose up -d --no-build
+          # Espera hasta 2 minutos a que la API responda con esta versión
+          timeout 120 bash -c \
+            'until curl -sf http://localhost:8080/api/health | grep -q "${{ github.sha }}"; do sleep 3; done'
+
+      - name: Pruebas de humo, API e2e y aceptación (Selenium) contra el stack local
+        env:
+          APP_BASE_URL: http://localhost:8080
+          EXPECTED_VERSION: ${{ github.sha }}
+        run: |
+          pytest tests/smoke tests/api tests/acceptance \
+            --html=e2e-report.html --self-contained-html
+
+      - name: Logs del stack si algo falla
+        if: failure()
+        run: docker compose logs
+
+      - name: Bajar el stack
+        if: always()
+        run: docker compose down -v
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-reports
+          path: |
+            backend/htmlcov/
+            backend/report.html
+            backend/coverage.xml
+            e2e-report.html
+            pylint-report.txt
+            flake8-report.txt
+
+      - name: SonarCloud Scan (Quality Gate)
+        uses: SonarSource/sonarqube-scan-action@v8
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL }}

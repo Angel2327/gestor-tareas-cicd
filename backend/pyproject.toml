@@ -1,2 +1,9 @@
 [tool.black]
 line-length = 88
+
+[tool.pylint.format]
+max-line-length = 88
+
+[tool.pylint."messages control"]
+disable = ["missing-module-docstring"]
+
