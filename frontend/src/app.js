@@ -138,5 +138,5 @@ async function loadHealth() {
   }
 }
 
-loadHealth();
+loadHealth().catch((err) => console.error(err));
 loadTasks().catch((err) => showMessage(err.message, true));

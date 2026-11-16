@@ -8,7 +8,9 @@ services:
     environment:
       POSTGRES_DB: tareas
       POSTGRES_USER: tareas
-      POSTGRES_PASSWORD: tareas-local  # Solo para desarrollo local
+      # La contraseña viene de la variable DB_PASSWORD (archivo .env en local,
+      # contraseña aleatoria en el pipeline); no se escribe en el repositorio.
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?Define DB_PASSWORD en el archivo .env}
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U tareas -d tareas"]
       interval: 3s
@@ -23,7 +25,7 @@ services:
       DB_HOST: db
       DB_NAME: tareas
       DB_USER: tareas
-      DB_PASSWORD: tareas-local
+      DB_PASSWORD: ${DB_PASSWORD:?Define DB_PASSWORD en el archivo .env}
       APP_VERSION: ${APP_VERSION:-local}
       ENVIRONMENT: local
     depends_on:

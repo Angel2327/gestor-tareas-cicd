@@ -7,3 +7,5 @@ max-line-length = 88
 [tool.pylint."messages control"]
 disable = ["missing-module-docstring"]
 
+[tool.bandit]
+exclude_dirs = ["tests"]

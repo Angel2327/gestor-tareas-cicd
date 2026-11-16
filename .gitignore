@@ -24,6 +24,7 @@ crash.log
 images.tar
 
 # Varios
+.env
 .idea/
 .vscode/
 .DS_Store

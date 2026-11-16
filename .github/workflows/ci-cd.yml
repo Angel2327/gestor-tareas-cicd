@@ -26,6 +26,7 @@ defaults:
 
 env:
   PYTHON_VERSION: "3.13"
+  TRIVY_VERSION: v0.69.3
   BACKEND_LOCAL_IMAGE: gestor-tareas-backend:${{ github.sha }}
   FRONTEND_LOCAL_IMAGE: gestor-tareas-frontend:${{ github.sha }}
 
@@ -68,6 +69,33 @@ jobs:
           flake8 backend/app backend/tests tests --config backend/.flake8 \
             --tee --output-file=flake8-report.txt
 
+      # ---------------- Seguridad (DevSecOps) ----------------
+      - name: Bandit (SAST - falla con hallazgos de severidad media o alta)
+        run: |
+          bandit -c backend/pyproject.toml -r backend/app -f json -o bandit-report.json --exit-zero
+          bandit -c backend/pyproject.toml -r backend/app -ll
+
+      - name: Trivy (dependencias y secretos en el repositorio)
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+
+      - name: Trivy (configuración de IaC y Dockerfiles, informativo)
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          scan-type: config
+          scan-ref: .
+          severity: HIGH,CRITICAL
+          exit-code: "0"
+          output: trivy-iac-report.txt
+
       # ---------------- Pruebas unitarias y de componente ----------------
       - name: Pruebas unitarias y de componente (cobertura >= 80 %)
         working-directory: backend
@@ -79,7 +107,31 @@ jobs:
           docker build -t "$BACKEND_LOCAL_IMAGE" backend
           docker build -t "$FRONTEND_LOCAL_IMAGE" frontend
 
+      - name: Trivy (imagen backend)
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          image-ref: ${{ env.BACKEND_LOCAL_IMAGE }}
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+
+      - name: Trivy (imagen frontend)
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          image-ref: ${{ env.FRONTEND_LOCAL_IMAGE }}
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+
       # ---------------- Pruebas de integración / aceptación ----------------
+      - name: Generar contraseña temporal para la BD del stack local
+        run: |
+          DB_PASSWORD=$(openssl rand -hex 16)
+          echo "::add-mask::$DB_PASSWORD"
+          echo "DB_PASSWORD=$DB_PASSWORD" >> "$GITHUB_ENV"
+
       - name: Levantar el stack completo (Nginx + API + PostgreSQL)
         env:
           BACKEND_IMAGE: ${{ env.BACKEND_LOCAL_IMAGE }}
@@ -119,6 +171,8 @@ jobs:
             e2e-report.html
             pylint-report.txt
             flake8-report.txt
+            bandit-report.json
+            trivy-iac-report.txt
 
       - name: SonarCloud Scan (Quality Gate)
         uses: SonarSource/sonarqube-scan-action@59202af334b4ba7b5db01b701b8e79f8b3bef0f4 # v8.5.0

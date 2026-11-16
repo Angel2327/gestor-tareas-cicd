@@ -3,6 +3,8 @@
 black==26.10.1
 pylint==4.1.4
 flake8==7.5.0
+# Seguridad
+bandit==1.9.4
 # Pruebas
 pytest==9.1.1
 pytest-cov==7.1.0
