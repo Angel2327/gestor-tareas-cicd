@@ -29,3 +29,6 @@ images.tar
 .vscode/
 .DS_Store
 _to_delete/
+
+# Evidencias para la presentación (solo locales)
+capturas/

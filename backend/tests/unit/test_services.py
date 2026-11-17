@@ -6,9 +6,11 @@ import pytest
 
 from app import config
 from app.services import (
+    MAX_PROJECT_NAME_LENGTH,
     MAX_TITLE_LENGTH,
     compute_stats,
     is_overdue,
+    normalize_project_name,
     normalize_title,
     priority_rank,
 )
@@ -30,6 +32,23 @@ class TestNormalizeTitle:
     def test_titulo_muy_largo_falla(self):
         with pytest.raises(ValueError, match="superar"):
             normalize_title("a" * (MAX_TITLE_LENGTH + 1))
+
+
+class TestNormalizeProjectName:
+    def test_quita_espacios_sobrantes(self):
+        assert normalize_project_name("  Proyecto   final ") == "Proyecto final"
+
+    def test_nombre_vacio_falla(self):
+        with pytest.raises(ValueError, match="vacío"):
+            normalize_project_name("   ")
+
+    def test_nombre_en_el_limite_es_valido(self):
+        name = "p" * MAX_PROJECT_NAME_LENGTH
+        assert normalize_project_name(name) == name
+
+    def test_nombre_muy_largo_falla(self):
+        with pytest.raises(ValueError, match="superar"):
+            normalize_project_name("p" * (MAX_PROJECT_NAME_LENGTH + 1))
 
 
 class TestIsOverdue:

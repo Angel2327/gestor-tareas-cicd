@@ -93,6 +93,37 @@ button {
 
 .list-header { display: flex; justify-content: space-between; align-items: center; }
 .list-header select { width: auto; }
+.filters { display: flex; gap: 0.5rem; }
+
+.inline-form { display: flex; gap: 0.5rem; align-items: center; }
+.inline-form button { margin-top: 0; white-space: nowrap; }
+
+#project-list {
+  list-style: none;
+  padding: 0;
+  margin: 0.8rem 0 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.project-chip {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.25rem 0.4rem 0.25rem 0.8rem;
+  border-radius: 999px;
+  background: #e0e7ff;
+  font-size: 0.9rem;
+}
+
+.project-chip button {
+  margin: 0;
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--danger);
+}
 
 #task-list { list-style: none; padding: 0; margin: 0; }
 

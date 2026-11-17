@@ -11,7 +11,16 @@ from app import crud
 from app.config import get_app_version, get_environment
 from app.database import get_db
 from app.models import Task
-from app.schemas import Priority, Stats, Status, TaskCreate, TaskOut, TaskUpdate
+from app.schemas import (
+    Priority,
+    ProjectCreate,
+    ProjectOut,
+    Stats,
+    Status,
+    TaskCreate,
+    TaskOut,
+    TaskUpdate,
+)
 from app.services import compute_stats, is_overdue
 
 app = FastAPI(
@@ -22,6 +31,7 @@ app = FastAPI(
 )
 
 NOT_FOUND = "Tarea no encontrada"
+PROJECT_NOT_FOUND = "Proyecto no encontrado"
 
 
 def _to_out(task: Task) -> TaskOut:
@@ -35,6 +45,15 @@ def _get_or_404(db: Session, task_id: int) -> Task:
     if task is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=NOT_FOUND)
     return task
+
+
+def _check_project(db: Session, project_id: int | None) -> None:
+    """Valida que el proyecto exista antes de asignarlo a una tarea."""
+    if project_id is not None and crud.get_project(db, project_id) is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="El proyecto indicado no existe",
+        )
 
 
 @app.get("/api/health")
@@ -58,22 +77,28 @@ def health(response: Response, db: Session = Depends(get_db)) -> dict:
 def list_tasks(
     task_status: Status | None = Query(default=None, alias="status"),
     priority: Priority | None = None,
+    project_id: int | None = None,
     db: Session = Depends(get_db),
 ) -> list[TaskOut]:
-    """Lista las tareas, con filtros opcionales por estado y prioridad."""
-    return [_to_out(t) for t in crud.list_tasks(db, task_status, priority)]
+    """Lista las tareas, con filtros opcionales por estado, prioridad y proyecto."""
+    tasks = crud.list_tasks(db, task_status, priority, project_id)
+    return [_to_out(t) for t in tasks]
 
 
 @app.get("/api/tasks/stats", response_model=Stats)
-def stats(db: Session = Depends(get_db)) -> Stats:
+def stats(project_id: int | None = None, db: Session = Depends(get_db)) -> Stats:
     """Indicadores: total, pendientes, completadas, vencidas y % de avance."""
-    rows = db.execute(select(Task.status, Task.due_date)).all()
+    query = select(Task.status, Task.due_date)
+    if project_id is not None:
+        query = query.where(Task.project_id == project_id)
+    rows = db.execute(query).all()
     return Stats(**compute_stats(((r[0], r[1]) for r in rows), date.today()))
 
 
 @app.post("/api/tasks", response_model=TaskOut, status_code=status.HTTP_201_CREATED)
 def create_task(data: TaskCreate, db: Session = Depends(get_db)) -> TaskOut:
     """Crea una tarea."""
+    _check_project(db, data.project_id)
     return _to_out(crud.create_task(db, data))
 
 
@@ -88,11 +113,49 @@ def update_task(
     task_id: int, data: TaskUpdate, db: Session = Depends(get_db)
 ) -> TaskOut:
     """Actualiza una tarea (por ejemplo, marcarla como completada)."""
-    return _to_out(crud.update_task(db, _get_or_404(db, task_id), data))
+    task = _get_or_404(db, task_id)
+    _check_project(db, data.project_id)
+    return _to_out(crud.update_task(db, task, data))
 
 
 @app.delete("/api/tasks/{task_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_task(task_id: int, db: Session = Depends(get_db)) -> Response:
     """Elimina una tarea."""
     crud.delete_task(db, _get_or_404(db, task_id))
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@app.get("/api/projects", response_model=list[ProjectOut])
+def list_projects(db: Session = Depends(get_db)) -> list[ProjectOut]:
+    """Lista los proyectos con la cantidad de tareas de cada uno."""
+    result = []
+    for project, count in crud.list_projects(db):
+        out = ProjectOut.model_validate(project)
+        out.task_count = count
+        result.append(out)
+    return result
+
+
+@app.post(
+    "/api/projects", response_model=ProjectOut, status_code=status.HTTP_201_CREATED
+)
+def create_project(data: ProjectCreate, db: Session = Depends(get_db)) -> ProjectOut:
+    """Crea un proyecto. El nombre no se puede repetir."""
+    if crud.get_project_by_name(db, data.name) is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Ya existe un proyecto con ese nombre",
+        )
+    return ProjectOut.model_validate(crud.create_project(db, data))
+
+
+@app.delete("/api/projects/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_project(project_id: int, db: Session = Depends(get_db)) -> Response:
+    """Elimina un proyecto. Sus tareas se conservan, sin proyecto."""
+    project = crud.get_project(db, project_id)
+    if project is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=PROJECT_NOT_FOUND
+        )
+    crud.delete_project(db, project)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

@@ -144,3 +144,81 @@ def test_estadisticas_y_vencidas(client):
         "overdue": 1,
         "completion_rate": 50.0,
     }
+
+
+# ---------------------------------------------------------------------------
+# Proyectos
+# ---------------------------------------------------------------------------
+def _create_project(client, name="Proyecto final", **kwargs):
+    response = client.post("/api/projects", json={"name": name, **kwargs})
+    assert response.status_code == 201, response.text
+    return response.json()
+
+
+def test_crear_y_listar_proyectos_con_conteo(client):
+    final = _create_project(client, "  Proyecto   final ", description="CI/CD")
+    assert final["name"] == "Proyecto final"
+    assert final["task_count"] == 0
+    otro = _create_project(client, "Arquitectura")
+    _create(client, title="t1", project_id=final["id"])
+    _create(client, title="t2", project_id=final["id"])
+
+    projects = client.get("/api/projects").json()
+    assert [p["name"] for p in projects] == ["Arquitectura", "Proyecto final"]
+    counts = {p["id"]: p["task_count"] for p in projects}
+    assert counts == {otro["id"]: 0, final["id"]: 2}
+
+
+@pytest.mark.parametrize("payload", [{"name": "   "}, {"name": "x" * 61}, {}])
+def test_crear_proyecto_invalido_devuelve_422(client, payload):
+    assert client.post("/api/projects", json=payload).status_code == 422
+
+
+def test_nombre_de_proyecto_duplicado_devuelve_409(client):
+    _create_project(client, "Proyecto final")
+    response = client.post("/api/projects", json={"name": "PROYECTO FINAL"})
+    assert response.status_code == 409
+
+
+def test_tarea_con_proyecto_inexistente_devuelve_422(client):
+    response = client.post("/api/tasks", json={"title": "x", "project_id": 999})
+    assert response.status_code == 422
+    task = _create(client)
+    response = client.patch(f"/api/tasks/{task['id']}", json={"project_id": 999})
+    assert response.status_code == 422
+
+
+def test_filtrar_tareas_y_estadisticas_por_proyecto(client):
+    project = _create_project(client)
+    _create(client, title="del proyecto", project_id=project["id"])
+    _create(client, title="sin proyecto")
+
+    tasks = client.get("/api/tasks", params={"project_id": project["id"]}).json()
+    assert [t["title"] for t in tasks] == ["del proyecto"]
+    assert tasks[0]["project_id"] == project["id"]
+
+    stats = client.get("/api/tasks/stats", params={"project_id": project["id"]})
+    assert stats.json()["total"] == 1
+    assert client.get("/api/tasks/stats").json()["total"] == 2
+
+
+def test_mover_tarea_a_otro_proyecto(client):
+    project = _create_project(client)
+    task = _create(client)
+    moved = client.patch(f"/api/tasks/{task['id']}", json={"project_id": project["id"]})
+    assert moved.json()["project_id"] == project["id"]
+
+
+def test_eliminar_proyecto_conserva_sus_tareas(client):
+    project = _create_project(client)
+    task = _create(client, project_id=project["id"])
+
+    assert client.delete(f"/api/projects/{project['id']}").status_code == 204
+    assert client.get("/api/projects").json() == []
+    assert client.get(f"/api/tasks/{task['id']}").json()["project_id"] is None
+
+
+def test_eliminar_proyecto_inexistente_devuelve_404(client):
+    response = client.delete("/api/projects/9999")
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Proyecto no encontrado"

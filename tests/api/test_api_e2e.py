@@ -84,3 +84,38 @@ def test_migraciones_aplicadas(api, task):
     # Si la migración 0002 no se hubiera aplicado, priority y due_date no existirían.
     assert task["priority"] == "high"
     assert "due_date" in task
+
+
+def test_proyectos_de_punta_a_punta(api):
+    name = f"e2e-proyecto-{uuid.uuid4().hex[:8]}"
+    project = requests.post(api + "/projects", json={"name": name}, timeout=TIMEOUT)
+    assert project.status_code == 201, project.text
+    project_id = project.json()["id"]
+    task = requests.post(
+        api + "/tasks",
+        json={"title": "e2e-con-proyecto", "project_id": project_id},
+        timeout=TIMEOUT,
+    ).json()
+    try:
+        # Nombre duplicado
+        dup = requests.post(api + "/projects", json={"name": name}, timeout=TIMEOUT)
+        assert dup.status_code == 409
+
+        # Filtro y estadísticas por proyecto
+        tasks = requests.get(
+            api + "/tasks", params={"project_id": project_id}, timeout=TIMEOUT
+        ).json()
+        assert [t["id"] for t in tasks] == [task["id"]]
+        stats = requests.get(
+            api + "/tasks/stats", params={"project_id": project_id}, timeout=TIMEOUT
+        ).json()
+        assert stats["total"] == 1
+
+        # Al eliminar el proyecto la tarea se conserva sin proyecto
+        deleted = requests.delete(f"{api}/projects/{project_id}", timeout=TIMEOUT)
+        assert deleted.status_code == 204
+        fetched = requests.get(f"{api}/tasks/{task['id']}", timeout=TIMEOUT).json()
+        assert fetched["project_id"] is None
+    finally:
+        requests.delete(f"{api}/projects/{project_id}", timeout=TIMEOUT)
+        requests.delete(f"{api}/tasks/{task['id']}", timeout=TIMEOUT)

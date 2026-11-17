@@ -21,6 +21,17 @@
       <div class="stat"><span id="stat-rate">0%</span><small>Avance</small></div>
     </section>
 
+    <section class="card" aria-label="Proyectos">
+      <h2>Proyectos</h2>
+      <form id="project-form" class="inline-form">
+        <label for="project-name" class="sr-only">Nombre del proyecto</label>
+        <input id="project-name" name="name" type="text" maxlength="60"
+               placeholder="Nombre del proyecto" required>
+        <button id="project-btn" type="submit">Crear proyecto</button>
+      </form>
+      <ul id="project-list"></ul>
+    </section>
+
     <form id="task-form" class="card">
       <h2>Nueva tarea</h2>
       <label for="title">Título</label>
@@ -43,6 +54,10 @@
           <input id="due-date" name="due_date" type="date">
         </div>
       </div>
+      <label for="project">Proyecto</label>
+      <select id="project" name="project_id">
+        <option value="">Sin proyecto</option>
+      </select>
       <button id="submit-btn" type="submit">Agregar tarea</button>
       <p id="message" role="status"></p>
     </form>
@@ -50,12 +65,18 @@
     <section class="card">
       <div class="list-header">
         <h2>Tareas</h2>
-        <label for="filter-status" class="sr-only">Filtrar por estado</label>
-        <select id="filter-status">
-          <option value="">Todas</option>
-          <option value="pending">Pendientes</option>
-          <option value="done">Completadas</option>
-        </select>
+        <div class="filters">
+          <label for="filter-project" class="sr-only">Filtrar por proyecto</label>
+          <select id="filter-project">
+            <option value="">Todos los proyectos</option>
+          </select>
+          <label for="filter-status" class="sr-only">Filtrar por estado</label>
+          <select id="filter-status">
+            <option value="">Todas</option>
+            <option value="pending">Pendientes</option>
+            <option value="done">Completadas</option>
+          </select>
+        </div>
       </div>
       <ul id="task-list"></ul>
       <p id="empty-msg">No hay tareas.</p>

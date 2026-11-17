@@ -6,6 +6,7 @@ from datetime import date
 PRIORITIES = ("low", "medium", "high")
 STATUSES = ("pending", "done")
 MAX_TITLE_LENGTH = 120
+MAX_PROJECT_NAME_LENGTH = 60
 
 
 def normalize_title(title: str) -> str:
@@ -15,6 +16,18 @@ def normalize_title(title: str) -> str:
         raise ValueError("El título no puede estar vacío")
     if len(cleaned) > MAX_TITLE_LENGTH:
         raise ValueError(f"El título no puede superar {MAX_TITLE_LENGTH} caracteres")
+    return cleaned
+
+
+def normalize_project_name(name: str) -> str:
+    """Normaliza el nombre de un proyecto: sin espacios sobrantes y no vacío."""
+    cleaned = " ".join(name.split())
+    if not cleaned:
+        raise ValueError("El nombre del proyecto no puede estar vacío")
+    if len(cleaned) > MAX_PROJECT_NAME_LENGTH:
+        raise ValueError(
+            f"El nombre no puede superar {MAX_PROJECT_NAME_LENGTH} caracteres"
+        )
     return cleaned
 
 

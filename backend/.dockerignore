@@ -7,3 +7,6 @@ report.html
 tests/
 .venv/
 *.db
+
+# Evidencias para la presentación
+capturas/
