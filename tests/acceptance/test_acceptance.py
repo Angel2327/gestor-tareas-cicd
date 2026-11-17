@@ -77,6 +77,16 @@ def _item(browser, title):
     return _wait(browser).until(EC.presence_of_element_located((By.XPATH, xpath)))
 
 
+def _select_option(browser, select_id, text):
+    """Elige una opción de un <select> cuando ya está cargada."""
+
+    def select(b):
+        Select(b.find_element(By.ID, select_id)).select_by_visible_text(text)
+        return True
+
+    _wait(browser).until(select)
+
+
 def _create_task(browser, title, priority="Alta"):
     browser.find_element(By.ID, "title").send_keys(title)
     browser.find_element(By.ID, "description").send_keys("Creada por Selenium")
@@ -109,7 +119,9 @@ def test_crear_completar_y_eliminar_tarea(browser, base_url):
     _wait(browser).until(
         EC.text_to_be_present_in_element((By.ID, "message"), "Tarea eliminada")
     )
-    assert not browser.find_elements(By.XPATH, f"//span[text()='{title}']")
+    _wait(browser).until(
+        lambda b: not b.find_elements(By.XPATH, f"//span[text()='{title}']")
+    )
 
 
 def test_filtro_por_estado(browser, base_url):
@@ -135,3 +147,49 @@ def test_titulo_vacio_muestra_error(browser, base_url):
     browser.find_element(By.ID, "submit-btn").click()
     message = browser.find_element(By.ID, "message")
     _wait(browser).until(lambda _: "error" in message.get_attribute("class"))
+
+
+def test_proyectos_crear_asignar_filtrar_y_eliminar(browser, base_url):
+    project = f"Proyecto {uuid.uuid4().hex[:6]}"
+    title = f"Con proyecto {uuid.uuid4().hex[:6]}"
+    _open(browser, base_url)
+
+    # Crear el proyecto
+    browser.find_element(By.ID, "project-name").send_keys(project)
+    browser.find_element(By.ID, "project-btn").click()
+    _wait(browser).until(
+        EC.text_to_be_present_in_element((By.ID, "message"), "Proyecto creado")
+    )
+    _wait(browser).until(
+        EC.text_to_be_present_in_element((By.ID, "project-list"), f"{project} (0)")
+    )
+
+    # Crear una tarea dentro del proyecto
+    _select_option(browser, "project", project)
+    item = _create_task(browser, title)
+    assert project in item.text
+    _wait(browser).until(
+        EC.text_to_be_present_in_element((By.ID, "project-list"), f"{project} (1)")
+    )
+
+    # Filtrar por el proyecto: solo aparece su tarea
+    Select(browser.find_element(By.ID, "filter-project")).select_by_visible_text(
+        project
+    )
+    _wait(browser).until(
+        lambda b: [e.text for e in b.find_elements(By.CLASS_NAME, "task-title")]
+        == [title]
+    )
+
+    # Eliminar el proyecto: la tarea se conserva sin proyecto
+    chip_xpath = f"//li[contains(@class,'project-chip')][contains(., '{project}')]"
+    browser.find_element(By.XPATH, chip_xpath).find_element(
+        By.CLASS_NAME, "project-delete-btn"
+    ).click()
+    _wait(browser).until(
+        EC.text_to_be_present_in_element((By.ID, "message"), "Proyecto eliminado")
+    )
+    _click(browser, title, "delete-btn")
+    _wait(browser).until(
+        EC.text_to_be_present_in_element((By.ID, "message"), "Tarea eliminada")
+    )

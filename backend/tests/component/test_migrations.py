@@ -23,17 +23,29 @@ def _columns(db_url: str) -> set[str]:
     return names
 
 
+def _tables(db_url: str) -> list[str]:
+    engine = create_engine(db_url)
+    names = inspect(engine).get_table_names()
+    engine.dispose()
+    return names
+
+
 def test_upgrade_crea_esquema_completo_y_downgrade_lo_revierte(tmp_path, monkeypatch):
     db_url = f"sqlite+pysqlite:///{tmp_path / 'test.db'}"
     cfg = _alembic_config(db_url, monkeypatch)
 
     command.upgrade(cfg, "head")
-    assert {"id", "title", "status", "priority", "due_date"} <= _columns(db_url)
+    assert {"id", "title", "status", "priority", "due_date", "project_id"} <= _columns(
+        db_url
+    )
+    assert "projects" in _tables(db_url)
+
+    command.downgrade(cfg, "0002")
+    assert "project_id" not in _columns(db_url)
+    assert "projects" not in _tables(db_url)
 
     command.downgrade(cfg, "0001")
     assert "priority" not in _columns(db_url)
 
     command.downgrade(cfg, "base")
-    engine = create_engine(db_url)
-    assert "tasks" not in inspect(engine).get_table_names()
-    engine.dispose()
+    assert "tasks" not in _tables(db_url)

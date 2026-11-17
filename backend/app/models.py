@@ -2,7 +2,7 @@
 
 from datetime import date, datetime, timezone
 
-from sqlalchemy import Date, DateTime, Integer, String, Text
+from sqlalchemy import Date, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
@@ -10,6 +10,19 @@ from app.database import Base
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+class Project(Base):  # pylint: disable=too-few-public-methods
+    """Proyecto que agrupa tareas."""
+
+    __tablename__ = "projects"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(60), nullable=False, unique=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_now
+    )
 
 
 class Task(Base):  # pylint: disable=too-few-public-methods
@@ -25,6 +38,9 @@ class Task(Base):  # pylint: disable=too-few-public-methods
         String(10), nullable=False, default="pending", index=True
     )
     due_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    project_id: Mapped[int | None] = mapped_column(
+        ForeignKey("projects.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_now
     )
